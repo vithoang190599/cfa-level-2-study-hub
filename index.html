@@ -1498,26 +1498,43 @@ html{scroll-behavior:smooth}section,.panel,.subject{scroll-margin-top:14px}@medi
   window.cfaStoragePersistent = persistent;
   window.cfaStorage = {
     getItem(key) {
+      if (Object.prototype.hasOwnProperty.call(memory, key)) return memory[key];
       if (nativeStore) {
         try { return nativeStore.getItem(key); }
-        catch (err) { nativeStore = null; window.cfaStoragePersistent = false; }
+        catch (err) { window.cfaStoragePersistent = false; }
       }
-      return Object.prototype.hasOwnProperty.call(memory, key) ? memory[key] : null;
+      return null;
     },
     setItem(key, value) {
       const text = String(value);
       if (nativeStore) {
-        try { nativeStore.setItem(key, text); return; }
-        catch (err) { nativeStore = null; window.cfaStoragePersistent = false; }
+        try { nativeStore.setItem(key, text); delete memory[key]; return true; }
+        catch (err) { window.cfaStoragePersistent = false; }
       }
       memory[key] = text;
+      return false;
     },
     removeItem(key) {
       if (nativeStore) {
-        try { nativeStore.removeItem(key); }
-        catch (err) { nativeStore = null; window.cfaStoragePersistent = false; }
+        try { nativeStore.removeItem(key); delete memory[key]; return; }
+        catch (err) { window.cfaStoragePersistent = false; }
       }
-      delete memory[key];
+      // Tombstone hides a stale native value if the browser blocks deletion.
+      memory[key] = null;
+    },
+    keys() {
+      const found = new Set(Object.keys(memory));
+      if (nativeStore) {
+        try {
+          for (let i = 0; i < nativeStore.length; i++) {
+            const key = nativeStore.key(i);
+            if (key !== null) found.add(key);
+          }
+        } catch (err) {
+          window.cfaStoragePersistent = false;
+        }
+      }
+      return Array.from(found);
     }
   };
 })();
@@ -2316,9 +2333,13 @@ $('biReset').onclick=()=>{step=0;bi()};
   function collect(){
     const data = {};
     const keys = new Set(KNOWN_KEYS);
-    const store = getStore();
-    if (store) {
-      try { for (let i=0; i<store.length; i++){ const k=store.key(i); if(allowed(k)) keys.add(k); } } catch(e) {}
+    if (window.cfaStorage && typeof window.cfaStorage.keys === 'function') {
+      try { window.cfaStorage.keys().forEach(k => { if (allowed(k)) keys.add(k); }); } catch(e) {}
+    } else {
+      const store = getStore();
+      if (store) {
+        try { for (let i=0; i<store.length; i++){ const k=store.key(i); if(allowed(k)) keys.add(k); } } catch(e) {}
+      }
     }
     keys.forEach(key => { if(allowed(key)){ const value=read(key); if(value !== null && value !== undefined) data[key]=value; } });
     return data;
@@ -2328,7 +2349,8 @@ $('biReset').onclick=()=>{step=0;bi()};
       format: 'cfa-master-hub-full-backup-v2',
       exportedAt: new Date().toISOString(),
       app: 'CFA Level II Master Study Hub',
-      storageMode: 'local-only-transfer',
+      storageMode: window.cfaStoragePersistent ? 'persistent-local' : 'session-memory',
+      keyCount: Object.keys(data).length,
       data
     };
     const blob = new Blob([JSON.stringify(payload,null,2)],{type:'application/json'});
@@ -2337,6 +2359,7 @@ $('biReset').onclick=()=>{step=0;bi()};
     a.download='CFA-L2-StudyHub-'+(suffix ? suffix+'-' : '')+new Date().toISOString().slice(0,10)+'.json';
     document.body.appendChild(a); a.click(); a.remove();
     setTimeout(()=>URL.revokeObjectURL(url),1500);
+    return payload.keyCount;
   }
   function status(message){
     const el=$('trackerSaveState'); if(el) el.textContent=message;
@@ -2351,12 +2374,10 @@ $('biReset').onclick=()=>{step=0;bi()};
       const obj=JSON.parse(await file.text());
       let data=obj && (obj.data || obj.localStorage);
       let partial=false;
-      // Backward compatibility with the old tracker-only backup format.
       if(!data && obj && obj.state && obj.state.setup && obj.state.readings){
         data={'cfa_master_hub_tracker_v2':JSON.stringify(obj.state)};
         partial=true;
       }
-      // Backward compatibility with a raw tracker state JSON.
       if(!data && obj && obj.setup && obj.readings){
         data={'cfa_master_hub_tracker_v2':JSON.stringify(obj)};
         partial=true;
@@ -2364,33 +2385,49 @@ $('biReset').onclick=()=>{step=0;bi()};
       if(!data || typeof data!=='object' || Array.isArray(data)) throw new Error('File backup không có dữ liệu hợp lệ.');
       const entries=Object.entries(data).filter(([k,v])=>allowed(k) && (typeof v==='string' || v===null || typeof v==='object'));
       if(!entries.length) throw new Error('Không tìm thấy nhóm dữ liệu CFA được hỗ trợ trong file.');
+      if(obj.keyCount!==undefined && Number(obj.keyCount)!==entries.length) throw new Error('Số nhóm dữ liệu trong backup không khớp metadata. Không có dữ liệu nào bị thay đổi.');
       const full = !partial && String(obj.format||'').includes('full-backup');
       const what = partial ? 'chỉ Reading Tracker' : 'toàn bộ tiến độ CFA';
-      const confirmed = confirm('Bạn đang khôi phục '+what+' từ '+file.name+'.\n\n'+(full?'Tiến độ hiện tại trên thiết bị này sẽ được thay thế bằng nội dung trong backup.':'Đây là backup tracker cũ; các nhóm dữ liệu khác sẽ được giữ nguyên.')+'\n\nTiếp tục?');
+      const storageWarning = window.cfaStoragePersistent ? '' : '\n\nCẢNH BÁO: Trình duyệt hiện chỉ lưu tạm trong phiên. Dữ liệu khôi phục có thể mất khi đóng tab/trình duyệt.';
+      const confirmed = confirm('Bạn đang khôi phục '+what+' từ '+file.name+'.\n\n'+(full?'Tiến độ hiện tại trên thiết bị này sẽ được thay thế bằng nội dung trong backup.':'Đây là backup tracker cũ; các nhóm dữ liệu khác sẽ được giữ nguyên.')+storageWarning+'\n\nTiếp tục?');
       if(!confirmed) return;
-      // Auto-download a safety copy of the receiving device before replacing its data.
-      try { download(collect(),'before-restore'); } catch(e) { console.warn('Could not create pre-restore backup',e); }
-      const restoreKeys = new Set(entries.map(([k])=>k));
-      if(full){
-        // Full backups are snapshots: remove known groups absent from the source, to avoid stale
-        // answers on the receiving device being mistaken for part of the imported progress.
-        KNOWN_KEYS.forEach(k=>{ if(!restoreKeys.has(k)) write(k,null); });
+      const previous=collect();
+      // Trigger a pre-restore export before the first write. If export creation fails, abort safely.
+      download(previous,'before-restore');
+      function applySnapshot(snapshot, replace){
+        const snapshotEntries=Object.entries(snapshot);
+        if(replace){
+          const keep=new Set(snapshotEntries.map(([k])=>k));
+          // Preserve unknown/future CFA keys that may have been created by newer app versions.
+          KNOWN_KEYS.forEach(k=>{if(!keep.has(k))write(k,null);});
+        }
+        for(const [key,value] of snapshotEntries){
+          const stored=value===null?null:(typeof value==='string'?value:JSON.stringify(value));
+          if(stored===null) write(key,null); else write(key,stored);
+        }
+        for(const [key,value] of snapshotEntries){
+          const expected=value===null?null:(typeof value==='string'?value:JSON.stringify(value));
+          if(read(key)!==expected) throw new Error('Không xác minh được dữ liệu sau khi ghi: '+key);
+        }
       }
-      for(const [key,value] of entries){
-        if(value===null) write(key,null);
-        else if(typeof value==='string') write(key,value);
-        else write(key,JSON.stringify(value));
+      try {
+        applySnapshot(Object.fromEntries(entries),full);
+      } catch(writeError) {
+        try { applySnapshot(previous,true); }
+        catch(rollbackError) { throw new Error('Khôi phục thất bại và rollback cũng gặp lỗi. Hãy giữ nguyên tab, không đóng trình duyệt và kiểm tra file backup trước-restore đã tải xuống. Chi tiết: '+writeError.message+'; rollback: '+rollbackError.message); }
+        throw new Error('Không thể xác minh dữ liệu đã ghi. Hệ thống đã khôi phục trạng thái trước khi import. '+writeError.message);
       }
-      status('Đã khôi phục '+entries.length+' nhóm dữ liệu · đang tải lại…');
-      alert('Đã nhập backup thành công. Trình duyệt sẽ tải lại Study Hub để hiển thị tiến độ.\n\nMột bản backup của dữ liệu trước khi khôi phục cũng đã được yêu cầu tải xuống.');
+      status('Đã khôi phục và xác minh '+entries.length+' nhóm dữ liệu · đang tải lại…');
+      alert('Đã nhập và xác minh backup thành công. Trình duyệt sẽ tải lại Study Hub.\n\nMột bản backup của dữ liệu trên thiết bị nhận đã được yêu cầu tải xuống trước khi khôi phục.'+(window.cfaStoragePersistent?'':'\n\nLưu ý: dữ liệu hiện chỉ tồn tại trong phiên này; hãy export backup trước khi đóng tab.'));
       setTimeout(()=>location.reload(),250);
     }catch(e){
       console.error(e);
       alert('Không thể nhập backup: '+(e && e.message ? e.message : 'Lỗi không xác định'));
-      status('Import thất bại · dữ liệu hiện tại chưa bị thay đổi');
+      status('Import thất bại · '+(e && e.message ? e.message : 'dữ liệu chưa được xác minh'));
     }
   }
   window.CFAProgressBackup={exportAll,importFile,collect};
+  if (!window.cfaStoragePersistent) status('Chỉ lưu tạm trong phiên · hãy export backup trước khi đóng');
 })();
 </script>
 
