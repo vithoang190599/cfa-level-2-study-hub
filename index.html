@@ -2396,9 +2396,9 @@ $('biReset').onclick=()=>{step=0;bi()};
       function applySnapshot(snapshot, replace){
         const snapshotEntries=Object.entries(snapshot);
         if(replace){
-          const existing=new Set([...KNOWN_KEYS,...Object.keys(collect())]);
           const keep=new Set(snapshotEntries.map(([k])=>k));
-          existing.forEach(k=>{if(allowed(k)&&!keep.has(k))write(k,null);});
+          // Preserve unknown/future CFA keys that may have been created by newer app versions.
+          KNOWN_KEYS.forEach(k=>{if(!keep.has(k))write(k,null);});
         }
         for(const [key,value] of snapshotEntries){
           const stored=value===null?null:(typeof value==='string'?value:JSON.stringify(value));
