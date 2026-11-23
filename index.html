@@ -1498,27 +1498,29 @@ html{scroll-behavior:smooth}section,.panel,.subject{scroll-margin-top:14px}@medi
   window.cfaStoragePersistent = persistent;
   window.cfaStorage = {
     getItem(key) {
+      if (Object.prototype.hasOwnProperty.call(memory, key)) return memory[key];
       if (nativeStore) {
         try { return nativeStore.getItem(key); }
-        catch (err) { nativeStore = null; window.cfaStoragePersistent = false; }
+        catch (err) { window.cfaStoragePersistent = false; }
       }
-      return Object.prototype.hasOwnProperty.call(memory, key) ? memory[key] : null;
+      return null;
     },
     setItem(key, value) {
       const text = String(value);
       if (nativeStore) {
-        try { nativeStore.setItem(key, text); return true; }
-        catch (err) { nativeStore = null; window.cfaStoragePersistent = false; }
+        try { nativeStore.setItem(key, text); delete memory[key]; return true; }
+        catch (err) { window.cfaStoragePersistent = false; }
       }
       memory[key] = text;
       return false;
     },
     removeItem(key) {
       if (nativeStore) {
-        try { nativeStore.removeItem(key); }
-        catch (err) { nativeStore = null; window.cfaStoragePersistent = false; }
+        try { nativeStore.removeItem(key); delete memory[key]; return; }
+        catch (err) { window.cfaStoragePersistent = false; }
       }
-      delete memory[key];
+      // Tombstone hides a stale native value if the browser blocks deletion.
+      memory[key] = null;
     },
     keys() {
       const found = new Set(Object.keys(memory));
@@ -1529,7 +1531,6 @@ html{scroll-behavior:smooth}section,.panel,.subject{scroll-margin-top:14px}@medi
             if (key !== null) found.add(key);
           }
         } catch (err) {
-          nativeStore = null;
           window.cfaStoragePersistent = false;
         }
       }
@@ -2426,6 +2427,7 @@ $('biReset').onclick=()=>{step=0;bi()};
     }
   }
   window.CFAProgressBackup={exportAll,importFile,collect};
+  if (!window.cfaStoragePersistent) status('Chỉ lưu tạm trong phiên · hãy export backup trước khi đóng');
 })();
 </script>
 
